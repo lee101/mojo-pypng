@@ -1,0 +1,19 @@
+[project]
+name = "mojo-pypng"
+version = "0.1.0"
+description = "pypng-compatible PNG encoding and decoding with Mojo scanline kernels"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Lee Penkman", email = "leepenkman@gmail.com" }]
+dependencies = ["numpy"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "python" }
+
+[tool.setuptools.packages.find]
+where = ["python"]
