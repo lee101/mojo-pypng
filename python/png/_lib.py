@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import ctypes
 import ctypes.util
 import os
@@ -15,6 +16,7 @@ I = ctypes.c_int64
 _SIGNATURES = {
     "mpp_filter_rows": ([I, I, I, I, I, I, I], I),
     "mpp_filter_rows_gpu": ([I, I, I, I, I, I, I], I),
+    "mpp_filter_rows_chunk": ([I, I, I, I, I, I, I, I, I], I),
     "mpp_unfilter_rows": ([I, I, I, I, I, I, I], I),
     "mpp_pack_bits": ([I, I, I, I, I, I, I], I),
     "mpp_unpack_bits": ([I, I, I, I, I, I, I], I),
@@ -25,6 +27,9 @@ _SIGNATURES = {
 _library: ctypes.CDLL | None = None
 _zlib: ctypes.CDLL | None | bool = None
 _MAX_BUFFER = 2**31 - 1
+_FILTER_THREAD_BYTES = 262144
+_FILTER_THREAD_ROWS = 64
+_FILTER_MAX_WORKERS = 16
 
 
 def lib() -> ctypes.CDLL:
@@ -155,6 +160,24 @@ def filter_rows(
         if ok:
             return filtered
         raise RuntimeError("Mojo GPU row filter failed")
+    if height * row_bytes >= _FILTER_THREAD_BYTES and height > _FILTER_THREAD_ROWS:
+        workers = min(height // _FILTER_THREAD_ROWS, _FILTER_MAX_WORKERS, os.cpu_count() or 1)
+        step = -(-height // workers)
+        bounds = [
+            (lo, min(lo + step, height)) for lo in range(0, height, step)
+        ]
+
+        def _filter_part(part: tuple[int, int]) -> None:
+            first, last = part
+            if not lib().mpp_filter_rows_chunk(
+                addr(raw), raw.nbytes, addr(filtered), filtered.nbytes,
+                height, row_bytes, bpp, first, last
+            ):
+                raise RuntimeError("Mojo row filter rejected validated buffers")
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(_filter_part, bounds))
+        return filtered
     ok = lib().mpp_filter_rows(
         addr(raw), raw.nbytes, addr(filtered), filtered.nbytes,
         height, row_bytes, bpp

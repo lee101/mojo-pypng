@@ -1,7 +1,5 @@
-from max.algorithm import parallelize
 from max.gpu.host import DeviceContext
-from std.gpu import global_idx
-from std.runtime import initialize_runtime
+from max.gpu import global_idx
 from std.sys.info import num_physical_cores, simd_width_of
 
 
@@ -244,43 +242,51 @@ def filter_one_row(
         x += 1
 
 
-@export("mpp_filter_rows")
-def mpp_filter_rows(src_addr: Int, src_len: Int, dst_addr: Int, dst_len: Int,
-                    height: Int, row_bytes: Int, bpp: Int) abi("C") -> Int:
+def filter_rows_range(
+    src_addr: Int,
+    src_len: Int,
+    dst_addr: Int,
+    dst_len: Int,
+    height: Int,
+    row_bytes: Int,
+    bpp: Int,
+    first: Int,
+    last: Int,
+) -> Bool:
     if height <= 0 or row_bytes <= 0 or bpp <= 0 or bpp > row_bytes:
-        return 0
+        return False
     if height > (MAX_GPU_BYTES // row_bytes):
-        return 0
+        return False
     var src_size = height * row_bytes
     if height > (MAX_GPU_BYTES // (row_bytes + 1)):
-        return 0
+        return False
     var dst_size = height * (row_bytes + 1)
     if not valid_buffers(
         src_addr, src_len, src_size, dst_addr, dst_len, dst_size
     ):
-        return 0
+        return False
     var src = U8Ptr(unsafe_from_address=src_addr)
     var dst = U8Ptr(unsafe_from_address=dst_addr)
-    if height * row_bytes >= PARALLEL_FILTER_BYTES and height > 1:
-        initialize_runtime()
-        var workers = min(height, num_physical_cores())
-        var rows_per_worker = (height + workers - 1) // workers
+    for y in range(first, last):
+        filter_one_row(src, dst, y, row_bytes, bpp)
+    return True
 
-        @__parameter
-        @__copy_capture(
-            src, dst, height, row_bytes, bpp, rows_per_worker
-        )
-        def process_rows(worker: Int):
-            var first = worker * rows_per_worker
-            var last = min(first + rows_per_worker, height)
-            for y in range(first, last):
-                filter_one_row(src, dst, y, row_bytes, bpp)
 
-        parallelize[process_rows](workers)
-    else:
-        for y in range(height):
-            filter_one_row(src, dst, y, row_bytes, bpp)
-    return 1
+@export("mpp_filter_rows")
+def mpp_filter_rows(src_addr: Int, src_len: Int, dst_addr: Int, dst_len: Int,
+                    height: Int, row_bytes: Int, bpp: Int) abi("C") -> Int:
+    return 1 if filter_rows_range(
+        src_addr, src_len, dst_addr, dst_len, height, row_bytes, bpp, 0, height
+    ) else 0
+
+
+@export("mpp_filter_rows_chunk")
+def mpp_filter_rows_chunk(src_addr: Int, src_len: Int, dst_addr: Int, dst_len: Int,
+                          height: Int, row_bytes: Int, bpp: Int,
+                          first: Int, last: Int) abi("C") -> Int:
+    return 1 if filter_rows_range(
+        src_addr, src_len, dst_addr, dst_len, height, row_bytes, bpp, first, last
+    ) else 0
 
 
 def filter_rows_gpu_kernel(
@@ -389,23 +395,8 @@ def mpp_unfilter_rows(src_addr: Int, src_len: Int, dst_addr: Int, dst_len: Int,
             all_none = False
 
     if all_none:
-        if height * row_bytes >= PARALLEL_COPY_BYTES and height > 1:
-            initialize_runtime()
-            var workers = min(height, num_physical_cores())
-            var rows_per_worker = (height + workers - 1) // workers
-
-            @__parameter
-            @__copy_capture(src, dst, height, row_bytes, rows_per_worker)
-            def copy_rows(worker: Int):
-                var first = worker * rows_per_worker
-                var last = min(first + rows_per_worker, height)
-                for y in range(first, last):
-                    copy_none_row(src, dst, y, row_bytes)
-
-            parallelize[copy_rows](workers)
-        else:
-            for y in range(height):
-                copy_none_row(src, dst, y, row_bytes)
+        for y in range(height):
+            copy_none_row(src, dst, y, row_bytes)
         return 1
 
     for y in range(height):
