@@ -1,6 +1,7 @@
 # Mojo dialect notes (verified by probe against the pinned compiler, not by docs)
 
-Toolchain these notes describe: `mojo ==1.1.0.dev2026081105`.
+Toolchain these notes describe: `mojo ==1.2.0.dev2026092605` (set in `bin/port.sh`; every
+repo gets this file with the marker already substituted).
 Every claim below was checked by compiling it. `bin/probe-confirm.py` and
 `bin/probe-hints.py` in the factory regenerate the list; re-run them after any
 toolchain bump rather than trusting this file.
@@ -58,52 +59,55 @@ comptime W = simd_width_of[DType.float64]()
 
 var i = 0
 while i + W <= n:                      # vector body
-    p.unsafe_store(i, p.unsafe_load[width=W](i) * 2.0)
+    p.store(i, p.load[width=W](i) * 2.0)
     i += W
 while i < n:                           # scalar tail
-    p.unsafe_store(i, p.unsafe_load(i) * 2.0)
+    p.store(i, p.unsafe_load(i) * 2.0)
     i += 1
 ```
-- `p.unsafe_load[width=W](i)` / `p.unsafe_store(i, v)` / `v.reduce_add()` all work.
-- `p.unsafe_load(i)` for a scalar load; `p.unsafe_offset(i)` also works.
-- `load` / `store` / positional `p[i]` / pointer `+` arithmetic all still
-  compile but warn. Use the `unsafe_*` names above in new code.
+- `p.load[width=W](i)` / `p.store(i, v)` / `v.reduce_add()` all work.
+- `p.unsafe_load(i)` for a scalar load; `p.unsafe_offset(i)[]` also works.
+- Positional `p[i]` still compiles but warns; prefer `unsafe_load`.
 
-## 4. Parallelism — moved to `max.algorithm`, not deleted
+## 4. Parallelism — REMOVED from the stdlib
 
-`parallelize` is gone from `std.algorithm` (which no longer even exports
-`sort`) and there is no `std.parallelism` / `std.threading`. It was **moved,
-not removed**: `from max.algorithm import parallelize` compiles and runs. The
-compiler gives no "did you mean" hint, so this looks exactly like a removal.
+Re-probed on 1.2.0, because losing CPU parallelism is the single biggest
+constraint on what a port can be:
 
-It really is concurrent — 16 workers each sleeping 0.5 s return in ~0.6 s, not
-~8 s. `initialize_runtime()` is required first; calling `parallelize` from a
-`--emit shared-lib` function that skipped it segfaults. The existing
-`@parameter` / `@__copy_capture` worker closures port over unchanged.
+| construct | result on 1.2.0 |
+| --- | --- |
+| `std.algorithm.parallelize` | `package 'algorithm' does not contain 'parallelize'` |
+| `std.sys.parallelize` | `package 'sys' does not contain 'parallelize'` |
+| `std.sys.spawn` | `package 'sys' does not contain 'spawn'` |
+| `std.threading` | `unable to locate module 'threading'` |
+| `std.algorithm.sort` | `package 'algorithm' does not contain 'sort'` |
+| bare `parallelize` | `use of unknown declaration 'parallelize'`, no hint |
 
-Consequence: a CPU kernel that was parallelised on the host can stay
-parallelised, importing from `max.algorithm`. Do NOT write
-`from std.algorithm import parallelize` and assume it works.
+`std.algorithm` not exporting `sort` is the tell: the module has been gutted, not
+merely renamed, and the bare name drawing no "did you mean" hint means it was
+removed rather than moved. There is no CPU parallelism reachable from the
+stdlib, so the performance ceiling for these ports is SIMD.
 
-## 5. GPU — host API moved to `max.gpu.host`
+Do NOT write `from std.algorithm import parallelize` and assume it works. Keep
+the work serial and say so honestly in the benchmark table; only use something
+from the `max` package if you have compiled it and measured it.
 
-- `from std.gpu import thread_idx` and `from std.gpu import global_idx` **work**.
-- `from std.memory import stack_allocation` resolves, but its signature does not
-  match the old `stack_allocation[T](n)` form — check it by compiling.
-- **`DeviceContext` is not in `std`**: not in `std.gpu.host`, not in `std.gpu`,
-  and the compiler suggests nothing. It was **moved, not deleted**:
-  `from max.gpu.host import DeviceContext` works, along with
-  `enqueue_create_buffer[DType.uint8](n)`, `enqueue_copy` in both directions,
-  `enqueue_function[k](..., grid_dim=, block_dim=)` and `synchronize()`. The
-  sources live under `site-packages/max/gpu/host/`; there is no `max/gpu`
-  directory listing because the package is compiled.
-- **Device kernels must take `DevicePassable` arguments.** An `Int` parameter
-  fails deep in the pass manager with `Int and UInt do not conform to
-  DevicePassable`; use `Int32` / `Int64` and widen with `Int(...)` in the body.
-  `Int` arithmetic on locals inside the kernel is fine.
-- `global_idx.x` does not compare cleanly against an `Int32` parameter in every
-  direction; writing `var y = Int(global_idx.x)` and comparing against
-  `Int(height)` is the form that compiles.
+## 5. GPU — the `std.gpu` module is GONE in this toolchain
+
+Re-probed on 1.2.0: **`from std.gpu import thread_idx` no longer works.** The whole
+`std.gpu` module is absent (`unable to locate module 'gpu'`), not just its host
+half. An earlier revision of this file said `thread_idx` worked; that was true on
+1.1.0 and is false here, so do not trust it without re-probing.
+
+- **`DeviceContext` does not exist**: not in `std.gpu.host`, not in `std.gpu`, and
+  the compiler has no replacement to suggest. `ctx.enqueue_create_buffer`,
+  `enqueue_copy`, `enqueue_function` and `synchronize` are therefore unavailable
+  too. The `max` package ships GPU sources under
+  `site-packages/max/sys/_hal/`; look there if you need a device path.
+- `from std.memory import stack_allocation` resolves, but the old
+  `stack_allocation[T](n)` form does NOT: it fails with
+  `no matching function in call to 'stack_allocation'`. Check the signature by
+  compiling rather than assuming the historic shape.
 
 Practical rule: a GPU path is only worth writing if you can compile and run it.
 Otherwise state in the README that the port is CPU-only and why. The GPU is shared
