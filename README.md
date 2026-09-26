@@ -100,6 +100,22 @@ parallel CPU path at this image size. It remains explicit rather than
 automatic. The benchmark performs one bounded GPU measurement only when
 `nvidia-smi` reports at least 4000 MiB free.
 
+## Toolchain
+
+The kernels are written against Mojo `1.1.0.dev2026081105` / `max`
+`26.6.0.dev2026081105` as pinned in `pixi.toml`. Two primitives moved out of
+`std` in this release and are imported from `max` instead: CPU row parallelism
+is `max.algorithm.parallelize`, and the GPU host driver is
+`max.gpu.host.DeviceContext` (`std.gpu.host` no longer defines it).
+`std.runtime.initialize_runtime()` must be called before the first
+`parallelize`. Device kernels must take fixed-width arguments — the entry in
+`filter_rows_gpu_kernel` takes `Int32` and widens to `Int` in the body, because
+`Int` does not satisfy `DevicePassable`. No kernel had to be reduced to serial.
+
+`MOJO_NOTES.md` records the rest of the dialect changes the port absorbed:
+`fn` is now `def`, `UnsafePointer` is now `Pointer`, `int()`/`float()` are now
+`Int()`/`Float64()`, and `simd_width_of` is imported from `std.sys.info`.
+
 ## How it works
 
 Python owns parsing, validation, chunk generation, CRC checks, and calls to

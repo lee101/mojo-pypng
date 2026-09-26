@@ -1,12 +1,12 @@
-from std.algorithm import parallelize
+from max.algorithm import parallelize
+from max.gpu.host import DeviceContext
 from std.gpu import global_idx
-from std.gpu.host import DeviceContext
 from std.runtime import initialize_runtime
 from std.sys.info import num_physical_cores, simd_width_of
 
 
-comptime U8Ptr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
-comptime U16Ptr = UnsafePointer[UInt16, AnyOrigin[mut=True]]
+comptime U8Ptr = Pointer[UInt8, AnyOrigin[mut=True]]
+comptime U16Ptr = Pointer[UInt16, AnyOrigin[mut=True]]
 comptime W = simd_width_of[DType.float64]()
 comptime PARALLEL_FILTER_BYTES = 262144
 comptime PARALLEL_COPY_BYTES = 1048576
@@ -82,16 +82,16 @@ def filter_score(src: U8Ptr, previous: U8Ptr, row_offset: Int, row_bytes: Int,
     var prefix = min(bpp, row_bytes)
     var x = 0
     while x < prefix:
-        var raw = Int(src[row_offset + x])
+        var raw = Int(src.unsafe_load(row_offset + x))
         var left = 0
         var up = 0
         var upper_left = 0
         if x >= bpp:
-            left = Int(src[row_offset + x - bpp])
+            left = Int(src.unsafe_load(row_offset + x - bpp))
         if has_previous:
-            up = Int(previous[x])
+            up = Int(previous.unsafe_load(x))
             if x >= bpp:
-                upper_left = Int(previous[x - bpp])
+                upper_left = Int(previous.unsafe_load(x - bpp))
         var predictor = 0
         if filter_type == 1:
             predictor = left
@@ -106,13 +106,13 @@ def filter_score(src: U8Ptr, previous: U8Ptr, row_offset: Int, row_bytes: Int,
 
     var vector_end = prefix + ((row_bytes - prefix) // W) * W
     while x < vector_end:
-        var raw = src.load[width=W](row_offset + x)
-        var left = src.load[width=W](row_offset + x - bpp)
+        var raw = src.unsafe_load[width=W](row_offset + x)
+        var left = src.unsafe_load[width=W](row_offset + x - bpp)
         var up = SIMD[DType.uint8, W](0)
         var upper_left = SIMD[DType.uint8, W](0)
         if has_previous:
-            up = previous.load[width=W](x)
-            upper_left = previous.load[width=W](x - bpp)
+            up = previous.unsafe_load[width=W](x)
+            upper_left = previous.unsafe_load[width=W](x - bpp)
         var predictor = SIMD[DType.uint8, W](0)
         if filter_type == 1:
             predictor = left
@@ -132,13 +132,13 @@ def filter_score(src: U8Ptr, previous: U8Ptr, row_offset: Int, row_bytes: Int,
         x += W
 
     while x < row_bytes:
-        var raw = Int(src[row_offset + x])
-        var left = Int(src[row_offset + x - bpp])
+        var raw = Int(src.unsafe_load(row_offset + x))
+        var left = Int(src.unsafe_load(row_offset + x - bpp))
         var up = 0
         var upper_left = 0
         if has_previous:
-            up = Int(previous[x])
-            upper_left = Int(previous[x - bpp])
+            up = Int(previous.unsafe_load(x))
+            upper_left = Int(previous.unsafe_load(x - bpp))
         var predictor = 0
         if filter_type == 1:
             predictor = left
@@ -164,7 +164,7 @@ def filter_one_row(
     var dst_offset = y * (row_bytes + 1)
     var previous = src
     if y > 0:
-        previous = src + row_offset - row_bytes
+        previous = src.unsafe_offset(row_offset - row_bytes)
     var has_previous = y > 0
     var best_type = 0
     var best_score = filter_score(
@@ -177,15 +177,15 @@ def filter_one_row(
         if score < best_score:
             best_score = score
             best_type = filter_type
-    dst[dst_offset] = UInt8(best_type)
+    dst.unsafe_store(dst_offset, UInt8(best_type))
 
     var prefix = min(bpp, row_bytes)
     var x = 0
     while x < prefix:
-        var raw = Int(src[row_offset + x])
+        var raw = Int(src.unsafe_load(row_offset + x))
         var up = 0
         if has_previous:
-            up = Int(previous[x])
+            up = Int(previous.unsafe_load(x))
         var predictor = 0
         if best_type == 2:
             predictor = up
@@ -193,18 +193,18 @@ def filter_one_row(
             predictor = up // 2
         elif best_type == 4:
             predictor = paeth(0, up, 0)
-        dst[dst_offset + 1 + x] = UInt8((raw - predictor) & 255)
+        dst.unsafe_store(dst_offset + 1 + x, UInt8((raw - predictor) & 255))
         x += 1
 
     var vector_end = prefix + ((row_bytes - prefix) // W) * W
     while x < vector_end:
-        var raw = src.load[width=W](row_offset + x)
-        var left = src.load[width=W](row_offset + x - bpp)
+        var raw = src.unsafe_load[width=W](row_offset + x)
+        var left = src.unsafe_load[width=W](row_offset + x - bpp)
         var up = SIMD[DType.uint8, W](0)
         var upper_left = SIMD[DType.uint8, W](0)
         if has_previous:
-            up = previous.load[width=W](x)
-            upper_left = previous.load[width=W](x - bpp)
+            up = previous.unsafe_load[width=W](x)
+            upper_left = previous.unsafe_load[width=W](x - bpp)
         var predictor = SIMD[DType.uint8, W](0)
         if best_type == 1:
             predictor = left
@@ -220,17 +220,17 @@ def filter_one_row(
             ).cast[DType.uint8]()
         elif best_type == 4:
             predictor = paeth_vector(left, up, upper_left)
-        dst.store(dst_offset + 1 + x, raw - predictor)
+        dst.unsafe_store(dst_offset + 1 + x, raw - predictor)
         x += W
 
     while x < row_bytes:
-        var raw = Int(src[row_offset + x])
-        var left = Int(src[row_offset + x - bpp])
+        var raw = Int(src.unsafe_load(row_offset + x))
+        var left = Int(src.unsafe_load(row_offset + x - bpp))
         var up = 0
         var upper_left = 0
         if has_previous:
-            up = Int(previous[x])
-            upper_left = Int(previous[x - bpp])
+            up = Int(previous.unsafe_load(x))
+            upper_left = Int(previous.unsafe_load(x - bpp))
         var predictor = 0
         if best_type == 1:
             predictor = left
@@ -240,7 +240,7 @@ def filter_one_row(
             predictor = (left + up) // 2
         elif best_type == 4:
             predictor = paeth(left, up, upper_left)
-        dst[dst_offset + 1 + x] = UInt8((raw - predictor) & 255)
+        dst.unsafe_store(dst_offset + 1 + x, UInt8((raw - predictor) & 255))
         x += 1
 
 
@@ -266,7 +266,7 @@ def mpp_filter_rows(src_addr: Int, src_len: Int, dst_addr: Int, dst_len: Int,
         var workers = min(height, num_physical_cores())
         var rows_per_worker = (height + workers - 1) // workers
 
-        @parameter
+        @__parameter
         @__copy_capture(
             src, dst, height, row_bytes, bpp, rows_per_worker
         )
@@ -286,13 +286,13 @@ def mpp_filter_rows(src_addr: Int, src_len: Int, dst_addr: Int, dst_len: Int,
 def filter_rows_gpu_kernel(
     src: U8Ptr,
     dst: U8Ptr,
-    height: Int,
-    row_bytes: Int,
-    bpp: Int,
+    height: Int32,
+    row_bytes: Int32,
+    bpp: Int32,
 ):
-    var y = global_idx.x
-    if y < height:
-        filter_one_row(src, dst, y, row_bytes, bpp)
+    var y = Int(global_idx.x)
+    if y < Int(height):
+        filter_one_row(src, dst, y, Int(row_bytes), Int(bpp))
 
 
 @export("mpp_filter_rows_gpu")
@@ -331,9 +331,9 @@ def mpp_filter_rows_gpu(
         ctx.enqueue_function[filter_rows_gpu_kernel](
             device_src,
             device_dst,
-            height,
-            row_bytes,
-            bpp,
+            Int32(height),
+            Int32(row_bytes),
+            Int32(bpp),
             grid_dim=grid_size,
             block_dim=block_size,
         )
@@ -355,10 +355,10 @@ def copy_none_row(
     var vector_end = (row_bytes // W) * W
     var x = 0
     while x < vector_end:
-        dst.store(dst_offset + x, src.load[width=W](src_offset + x))
+        dst.unsafe_store(dst_offset + x, src.unsafe_load[width=W](src_offset + x))
         x += W
     while x < row_bytes:
-        dst[dst_offset + x] = src[src_offset + x]
+        dst.unsafe_store(dst_offset + x, src.unsafe_load(src_offset + x))
         x += 1
 
 
@@ -382,7 +382,7 @@ def mpp_unfilter_rows(src_addr: Int, src_len: Int, dst_addr: Int, dst_len: Int,
     var all_none = True
     for y in range(height):
         var src_offset = y * (row_bytes + 1)
-        var filter_type = Int(src[src_offset])
+        var filter_type = Int(src.unsafe_load(src_offset))
         if filter_type < 0 or filter_type > 4:
             return 0
         if filter_type != 0:
@@ -394,7 +394,7 @@ def mpp_unfilter_rows(src_addr: Int, src_len: Int, dst_addr: Int, dst_len: Int,
             var workers = min(height, num_physical_cores())
             var rows_per_worker = (height + workers - 1) // workers
 
-            @parameter
+            @__parameter
             @__copy_capture(src, dst, height, row_bytes, rows_per_worker)
             def copy_rows(worker: Int):
                 var first = worker * rows_per_worker
@@ -411,7 +411,7 @@ def mpp_unfilter_rows(src_addr: Int, src_len: Int, dst_addr: Int, dst_len: Int,
     for y in range(height):
         var src_offset = y * (row_bytes + 1)
         var row_offset = y * row_bytes
-        var filter_type = Int(src[src_offset])
+        var filter_type = Int(src.unsafe_load(src_offset))
         if filter_type == 0:
             copy_none_row(src, dst, y, row_bytes)
             continue
@@ -419,32 +419,33 @@ def mpp_unfilter_rows(src_addr: Int, src_len: Int, dst_addr: Int, dst_len: Int,
             var vector_end = (row_bytes // W) * W
             var x = 0
             while x < vector_end:
-                var filtered = src.load[width=W](src_offset + 1 + x)
+                var filtered = src.unsafe_load[width=W](src_offset + 1 + x)
                 var up = SIMD[DType.uint8, W](0)
                 if y > 0:
-                    up = dst.load[width=W](row_offset - row_bytes + x)
-                dst.store(row_offset + x, filtered + up)
+                    up = dst.unsafe_load[width=W](row_offset - row_bytes + x)
+                dst.unsafe_store(row_offset + x, filtered + up)
                 x += W
             while x < row_bytes:
                 var up = 0
                 if y > 0:
-                    up = Int(dst[row_offset - row_bytes + x])
-                dst[row_offset + x] = UInt8(
-                    (Int(src[src_offset + 1 + x]) + up) & 255
+                    up = Int(dst.unsafe_load(row_offset - row_bytes + x))
+                dst.unsafe_store(
+                    row_offset + x,
+                    UInt8((Int(src.unsafe_load(src_offset + 1 + x)) + up) & 255),
                 )
                 x += 1
             continue
         for x in range(row_bytes):
-            var filtered = Int(src[src_offset + 1 + x])
+            var filtered = Int(src.unsafe_load(src_offset + 1 + x))
             var left = 0
             var up = 0
             var upper_left = 0
             if x >= bpp:
-                left = Int(dst[row_offset + x - bpp])
+                left = Int(dst.unsafe_load(row_offset + x - bpp))
             if y > 0:
-                up = Int(dst[row_offset - row_bytes + x])
+                up = Int(dst.unsafe_load(row_offset - row_bytes + x))
                 if x >= bpp:
-                    upper_left = Int(dst[row_offset - row_bytes + x - bpp])
+                    upper_left = Int(dst.unsafe_load(row_offset - row_bytes + x - bpp))
             var predictor = 0
             if filter_type == 1:
                 predictor = left
@@ -454,7 +455,7 @@ def mpp_unfilter_rows(src_addr: Int, src_len: Int, dst_addr: Int, dst_len: Int,
                 predictor = (left + up) // 2
             elif filter_type == 4:
                 predictor = paeth(left, up, upper_left)
-            dst[row_offset + x] = UInt8((filtered + predictor) & 255)
+            dst.unsafe_store(row_offset + x, UInt8((filtered + predictor) & 255))
     return 1
 
 
@@ -487,11 +488,11 @@ def mpp_pack_bits(src_addr: Int, src_len: Int, dst_addr: Int, dst_len: Int,
                 var sample_index = byte_index * samples_per_byte + lane
                 var sample = 0
                 if sample_index < samples_per_row:
-                    sample = Int(src[y * samples_per_row + sample_index])
+                    sample = Int(src.unsafe_load(y * samples_per_row + sample_index))
                     if sample > mask:
                         return 0
                 packed |= sample << (8 - bitdepth * (lane + 1))
-            dst[y * row_bytes + byte_index] = UInt8(packed)
+            dst.unsafe_store(y * row_bytes + byte_index, UInt8(packed))
     return 1
 
 
@@ -521,8 +522,9 @@ def mpp_unpack_bits(src_addr: Int, src_len: Int, dst_addr: Int, dst_len: Int,
             var bit_offset = x * bitdepth
             var byte_index = bit_offset // 8
             var shift = 8 - bitdepth - (bit_offset & 7)
-            dst[y * samples_per_row + x] = UInt8(
-                (Int(src[y * row_bytes + byte_index]) >> shift) & mask
+            dst.unsafe_store(
+                y * samples_per_row + x,
+                UInt8((Int(src.unsafe_load(y * row_bytes + byte_index)) >> shift) & mask),
             )
     return 1
 
@@ -539,9 +541,9 @@ def mpp_pack_u16be(src_addr: Int, src_len: Int, dst_addr: Int, dst_len: Int,
     var src = U16Ptr(unsafe_from_address=src_addr)
     var dst = U8Ptr(unsafe_from_address=dst_addr)
     for i in range(count):
-        var value = Int(src[i])
-        dst[2 * i] = UInt8(value >> 8)
-        dst[2 * i + 1] = UInt8(value & 255)
+        var value = Int(src.unsafe_load(i))
+        dst.unsafe_store(2 * i, UInt8(value >> 8))
+        dst.unsafe_store(2 * i + 1, UInt8(value & 255))
     return 1
 
 
@@ -557,5 +559,5 @@ def mpp_unpack_u16be(src_addr: Int, src_len: Int, dst_addr: Int, dst_len: Int,
     var src = U8Ptr(unsafe_from_address=src_addr)
     var dst = U16Ptr(unsafe_from_address=dst_addr)
     for i in range(count):
-        dst[i] = UInt16((Int(src[2 * i]) << 8) | Int(src[2 * i + 1]))
+        dst.unsafe_store(i, UInt16((Int(src.unsafe_load(2 * i)) << 8) | Int(src.unsafe_load(2 * i + 1))))
     return 1
